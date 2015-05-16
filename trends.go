@@ -33,12 +33,14 @@ type Trend struct {
 }
 
 // GetPlaceTrends implements /trends/place.json
-func (a TwitterApi) GetPlaceTrends(id string, exclude string, v url.Values) (trendResponse TrendResponse, err error) {
+func (a TwitterApi) GetPlaceTrends(id string, exclude string, v url.Values) (trendResponse []TrendResponse, err error) {
 	if v == nil {
 		v = url.Values{}
 	}
 	v.Set("id", id)
-	v.Set("exclude", exclude)
+	if exclude != "" {
+		v.Set("exclude", exclude)
+	}
 
 	response_ch := make(chan response)
 	a.queryQueue <- query{BaseUrl + "/trends/place.json", v, &trendResponse, _GET, response_ch}
