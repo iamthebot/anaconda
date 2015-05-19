@@ -14,6 +14,10 @@ type Entities struct {
 		Indices []int
 		Text    string
 	}
+	Symbols []struct {
+		Indices []int
+		Text    string
+	}
 	Urls []struct {
 		Indices      []int
 		Url          string
