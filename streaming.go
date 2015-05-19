@@ -229,18 +229,18 @@ func (s Stream) listen(response http.Response) {
 	}
 }
 
-func (s Stream) requestStream(urlStr string, v url.Values, method int) (resp *http.Response, err error) {
+func (s Stream) requestStream(a *TwitterApi, urlStr string, v url.Values, method int) (resp *http.Response, err error) {
 	switch method {
 	case _GET:
-		return oauthClient.Get(s.api.HttpClient, s.api.Credentials, urlStr, v)
+		return a.OauthClient.Get(s.api.HttpClient, s.api.Credentials, urlStr, v)
 	case _POST:
-		return oauthClient.Post(s.api.HttpClient, s.api.Credentials, urlStr, v)
+		return a.OauthClient.Post(s.api.HttpClient, s.api.Credentials, urlStr, v)
 	default:
 	}
 	return nil, fmt.Errorf("HTTP method not yet supported")
 }
 
-func (s Stream) loop(urlStr string, v url.Values, method int) {
+func (s Stream) loop(a *TwitterApi, urlStr string, v url.Values, method int) {
 	defer s.api.Log.Debug("Leaving request stream loop")
 	defer s.waitGroup.Done()
 
@@ -254,7 +254,7 @@ func (s Stream) loop(urlStr string, v url.Values, method int) {
 			s.api.Log.Notice("leaving stream loop")
 			return
 		default:
-			resp, err := s.requestStream(urlStr, v, method)
+			resp, err := s.requestStream(a, urlStr, v, method)
 			if err != nil {
 				s.api.Log.Criticalf("Cannot request stream : %s", err)
 				s.Quit <- true
@@ -285,9 +285,9 @@ func (s Stream) loop(urlStr string, v url.Values, method int) {
 	}
 }
 
-func (s Stream) Start(urlStr string, v url.Values, method int) {
+func (s Stream) Start(a *TwitterApi, urlStr string, v url.Values, method int) {
 	s.waitGroup.Add(1)
-	go s.loop(urlStr, v, method)
+	go s.loop(a, urlStr, v, method)
 }
 
 func (a TwitterApi) newStream(urlStr string, v url.Values, method int) Stream {
@@ -297,7 +297,7 @@ func (a TwitterApi) newStream(urlStr string, v url.Values, method int) Stream {
 		C:         make(chan interface{}),
 		waitGroup: &sync.WaitGroup{},
 	}
-	stream.Start(urlStr, v, method)
+	stream.Start(&a, urlStr, v, method)
 	return stream
 }
 
