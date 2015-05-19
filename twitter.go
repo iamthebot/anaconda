@@ -102,7 +102,7 @@ const DEFAULT_CAPACITY = 5
 
 //NewTwitterApi takes an user-specific access token and secret and returns a TwitterApi struct for that user.
 //The TwitterApi struct can be used for accessing any of the endpoints available.
-func NewTwitterApi(consumer_token, string, consumer_secret string, access_token string, access_token_secret string) *TwitterApi {
+func NewTwitterApi(consumer_token string, consumer_secret string, access_token string, access_token_secret string) *TwitterApi {
 	//TODO figure out how much to buffer this channel
 	//A non-buffered channel will cause blocking when multiple queries are made at the same time
 	queue := make(chan query)
