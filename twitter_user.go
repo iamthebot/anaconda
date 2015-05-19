@@ -1,4 +1,7 @@
 package anaconda
+import (
+    "time"
+)
 
 type User struct {
 	ContributorsEnabled            bool     `json:"contributors_enabled"`
@@ -48,3 +51,6 @@ type User struct {
 
 // Provide language translator from BCP-47 to human readable format for Lang field?
 // Available through golang.org/x/text/language, deserves further investigation
+func (u User) CreatedAtTime() (time.Time, error) {
+	return time.Parse(time.RubyDate, u.CreatedAt)
+}
