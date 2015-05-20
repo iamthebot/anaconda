@@ -1,6 +1,7 @@
 package anaconda
+
 import (
-    "time"
+	"time"
 )
 
 type User struct {
