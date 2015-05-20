@@ -87,13 +87,6 @@ type TwitterApi struct {
 	Log Logger
 }
 
-type RedisConfig struct {
-	Host   string
-	Port   int
-	DB     int
-	Prefix string //usually the account name
-}
-
 type query struct {
 	url         string
 	form        url.Values
@@ -140,7 +133,11 @@ func (c *TwitterApi) ReturnRateLimitError(b bool) {
 	c.returnRateLimitError = b
 }
 
-func (c *TwitterApi) ConfigureRedis(prefix string, host string, port int, db int) {
+func (c *TwitterApi) SetScreenName(n string) {
+	c.ScreenName = n
+}
+
+func (c *TwitterApi) ConfigureRedis(host string, port int, db int) {
 	spec := redis.ConnectionSpec{}
 	spec.Host(host)
 	spec.Port(port)
