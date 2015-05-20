@@ -4,9 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	redis "github.com/alphazero/go-redis"
+	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -144,15 +148,80 @@ type TooManyFollow struct {
 //
 
 type Stream struct {
-	api       TwitterApi
-	C         chan interface{}
-	Quit      chan bool
-	waitGroup *sync.WaitGroup
+	api  TwitterApi
+	C    chan Tweet //Where outputted tweets go
+	Quit chan bool
+
+	streamBody  *io.ReadCloser
+	waitGroup   *sync.WaitGroup
+	redisClient *redis.Client
+	meter       FlowMeter //used to prevent stalls/monitor flow
+}
+
+// Measure flow of tweets
+type FlowMeter struct {
+	//Used to prevent twitter stalls
+	ticker90 chan time.Time
+	count90  int
+
+	//Used for monitoring flow
+	ticker60 chan time.Time
+	count60  int
+
+	//Are we logging flow rate to redis?
+	redisFlow bool
+
+	//Used if redis logging enabled
+	keyPrefix string
+}
+
+func (s Stream) resetTicker90() {
+	for _ = range s.meter.ticker90 {
+		if s.meter.count90 == 0 {
+			log.Printf("%s recieved no tweets for 90 seconds. Reconnecting...\n", s.meter.keyPrefix)
+			(*s.streamBody).Close()
+		}
+		s.meter.count90 = 0
+	}
+}
+
+func (s Stream) resetTicker60() {
+	for _ = range s.meter.ticker60 {
+		(*s.redisClient).Set(
+			fmt.Sprintf("%s$last60s", s.meter.keyPrefix),
+			[]byte(strconv.FormatInt(int64(s.meter.count60), 10)),
+		)
+		s.meter.count60 = 0
+	}
+}
+
+func (s Stream) initFlowMeter(keyPrefix string) {
+	m := FlowMeter{}
+	if s.redisClient != nil {
+		m.redisFlow = true
+		go s.resetTicker60()
+	}
+	s.meter = m
+	s.meter.keyPrefix = keyPrefix
+	go s.resetTicker90()
+}
+
+//Worker keeps an accurate flow rate
+func (s Stream) Push(t Tweet) {
+	s.C <- t
+	s.meter.count90++
+	if s.meter.redisFlow {
+		s.meter.count60++
+	}
 }
 
 // Interrupt starts the finishing sequence
 func (s Stream) Interrupt() {
 	s.api.Log.Notice("Stream closing...")
+	close(s.meter.ticker90)
+	if s.meter.redisFlow {
+		close(s.meter.ticker60)
+	}
 	close(s.Quit)
 	s.api.Log.Debug("Stream closed.")
 }
@@ -163,14 +232,14 @@ func (s Stream) End() {
 	close(s.C)
 }
 
-func (s Stream) listen(response http.Response) {
-	defer response.Body.Close()
+func (s Stream) listen() {
+	defer (*s.streamBody).Close()
 
 	s.api.Log.Notice("Listenning to twitter socket")
-	scanner := bufio.NewScanner(response.Body)
+	scanner := bufio.NewScanner(*s.streamBody)
 	for {
 		if ok := scanner.Scan(); !ok {
-			s.api.Log.Notice("twitter socket closed, leaving loop")
+			log.Printf("%s twitter socket closed, leaving loop\n", s.meter.keyPrefix)
 			return
 		}
 
@@ -189,41 +258,29 @@ func (s Stream) listen(response http.Response) {
 				s.C <- *o
 			} else if o := new(statusDeletionNotice); jsonAsStruct(j, "/delete", o) {
 				s.api.Log.Debug("Got a statusDeletionNotice")
-				s.C <- *o.Delete.Status
 			} else if o := new(locationDeletionNotice); jsonAsStruct(j, "/scrub_geo", o) {
 				s.api.Log.Debug("Got a locationDeletionNotice")
-				s.C <- *o.ScrubGeo
 			} else if o := new(limitNotice); jsonAsStruct(j, "/limit", o) {
-				s.api.Log.Debug("Got a limitNotice")
-				s.C <- *o.Limit
+				log.Printf("%s Got a stream limit notice: %s\n", s.meter.keyPrefix, string(j))
 			} else if o := new(statusWithheldNotice); jsonAsStruct(j, "/status_withheld", o) {
 				s.api.Log.Debug("Got a statusWithheldNotice")
-				s.C <- *o.StatusWithheld
 			} else if o := new(userWithheldNotice); jsonAsStruct(j, "/user_withheld", o) {
 				s.api.Log.Debug("Got a userWithheldNotice")
-				s.C <- *o.UserWithheld
 			} else if o := new(disconnectMessage); jsonAsStruct(j, "/disconnect", o) {
-				s.api.Log.Debug("Got a disconnectMessage")
-				s.C <- *o.Disconnect
+				log.Printf("%s got a disconnectMessage %s\n", s.meter.keyPrefix, string(j))
+				return
 			} else if o := new(stallWarning); jsonAsStruct(j, "/warning", o) {
-				s.api.Log.Debug("Got a stallWarning")
-				s.C <- *o.Warning
+				log.Printf("%s got a stallWarning: %s\n", s.meter.keyPrefix, string(j))
 			} else if o := new(friendsList); jsonAsStruct(j, "/friends", o) {
 				s.api.Log.Debug("Got a friendsList")
-				s.C <- *o.Friends
 			} else if o := new(streamDirectMessage); jsonAsStruct(j, "/direct_message", o) {
 				s.api.Log.Debug("Got a streamDirectMessage")
-				s.C <- *o.DirectMessage
 			} else if o := new(EventTweet); jsonAsStruct(j, "/target_object/source", o) {
 				s.api.Log.Debug("Got a EventTweet")
-				s.C <- *o
-			} else if o := new(EventList); jsonAsStruct(j, "/target_object/slug", o) {
-				s.C <- *o
 			} else if o := new(Event); jsonAsStruct(j, "/target_object", o) {
 				s.api.Log.Debug("Got a Event")
-				s.C <- *o
 			} else {
-				s.api.Log.Debug("Can't parse what I got, droping it")
+				log.Printf("%s got unknown message from stream: %s\n", s.meter.keyPrefix, string(j))
 			}
 		}
 	}
@@ -264,7 +321,8 @@ func (s Stream) loop(a *TwitterApi, urlStr string, v url.Values, method int) {
 
 			switch resp.StatusCode {
 			case 200, 304:
-				s.listen(*resp)
+				s.streamBody = &resp.Body
+				s.listen()
 				backoff = baseBackoff
 			case 420, 429, 503:
 				s.api.Log.Noticef("Twitter streaming: waiting %+s and backing off as got : %+s", calmDownBackoff, resp.Status)
@@ -292,10 +350,14 @@ func (s Stream) Start(a *TwitterApi, urlStr string, v url.Values, method int) {
 
 func (a TwitterApi) newStream(urlStr string, v url.Values, method int) Stream {
 	stream := Stream{
-		api:       a,
-		Quit:      make(chan bool),
-		C:         make(chan interface{}),
-		waitGroup: &sync.WaitGroup{},
+		api:         a,
+		Quit:        make(chan bool),
+		C:           make(chan Tweet),
+		waitGroup:   &sync.WaitGroup{},
+		redisClient: a.RedisClient,
+	}
+	if stream.redisClient != nil {
+		stream.initFlowMeter(a.ScreenName)
 	}
 	stream.Start(&a, urlStr, v, method)
 	return stream
