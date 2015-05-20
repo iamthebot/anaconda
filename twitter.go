@@ -42,13 +42,14 @@ package anaconda
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/ChimeraCoder/tokenbucket"
+	"github.com/alphazero/go-redis"
+	"github.com/garyburd/go-oauth/oauth"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/ChimeraCoder/tokenbucket"
-	"github.com/garyburd/go-oauth/oauth"
 )
 
 const (
@@ -59,29 +60,38 @@ const (
 	UploadBaseUrl = "https://upload.twitter.com/1.1"
 )
 
-func NewOauthClient(consumer_key string, consumer_secret string) *oauth.Client{
-    var oauthClient = oauth.Client{
-        TemporaryCredentialRequestURI: "https://api.twitter.com/oauth/request_token",
-        ResourceOwnerAuthorizationURI: "https://api.twitter.com/oauth/authenticate",
-        TokenRequestURI:               "https://api.twitter.com/oauth/access_token",
-    }
+func NewOauthClient(consumer_key string, consumer_secret string) *oauth.Client {
+	var oauthClient = oauth.Client{
+		TemporaryCredentialRequestURI: "https://api.twitter.com/oauth/request_token",
+		ResourceOwnerAuthorizationURI: "https://api.twitter.com/oauth/authenticate",
+		TokenRequestURI:               "https://api.twitter.com/oauth/access_token",
+	}
 	oauthClient.Credentials.Token = consumer_key
 	oauthClient.Credentials.Secret = consumer_secret
-    return &oauthClient
+	return &oauthClient
 }
 
 type TwitterApi struct {
 	Credentials          *oauth.Credentials
-    OauthClient          *oauth.Client
+	ScreenName           string
+	OauthClient          *oauth.Client
 	queryQueue           chan query
 	bucket               *tokenbucket.Bucket
 	returnRateLimitError bool
 	HttpClient           *http.Client
+	RedisClient          *redis.Client
 
 	// Currently used only for the streaming API
 	// and for checking rate-limiting headers
 	// Default logger is silent
 	Log Logger
+}
+
+type RedisConfig struct {
+	Host   string
+	Port   int
+	DB     int
+	Prefix string //usually the account name
 }
 
 type query struct {
@@ -115,19 +125,33 @@ func NewTwitterApi(consumer_token string, consumer_secret string, access_token s
 		bucket:               nil,
 		returnRateLimitError: false,
 		HttpClient:           http.DefaultClient,
+		RedisClient:          nil,
 		Log:                  silentLogger{},
 	}
-    c.OauthClient = NewOauthClient(consumer_token, consumer_secret)
+	c.OauthClient = NewOauthClient(consumer_token, consumer_secret)
 	go c.throttledQuery()
 	return c
 }
-
 
 // ReturnRateLimitError specifies behavior when the Twitter API returns a rate-limit error.
 // If set to true, the query will fail and return the error instead of automatically queuing and
 // retrying the query when the rate limit expires
 func (c *TwitterApi) ReturnRateLimitError(b bool) {
 	c.returnRateLimitError = b
+}
+
+func (c *TwitterApi) ConfigureRedis(prefix string, host string, port int, db int) {
+	spec := redis.ConnectionSpec{}
+	spec.Host(host)
+	spec.Port(port)
+	spec.Db(db)
+	var err error
+	var rc redis.Client
+	rc, err = redis.NewSynchClientWithSpec(&spec)
+	c.RedisClient = &rc
+	if err != nil {
+		log.Fatalf("Couldn't create redis client: %s\n", err.Error())
+	}
 }
 
 // Enable query throttling using the tokenbucket algorithm
